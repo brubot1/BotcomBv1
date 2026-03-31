@@ -6,7 +6,7 @@
 export const config = {
     sessionName: 'session',
     prefix: '!',
-    ownerNumber: '17542882097',
+    ownerNumber: 'SEU_NUMERO',
     botName: 'StickerBot',
     
     // ========================================
