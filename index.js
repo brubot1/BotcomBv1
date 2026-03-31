@@ -1,0 +1,564 @@
+//COMPLETO - COM CÓDIGO ALFANUMÉRICO
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import qrcode from 'qrcode-terminal';
+import pino from 'pino';
+import readline from 'readline';
+import fs from 'fs/promises';
+import { config } from './config.js';
+import { stickerPlugin } from './plugins/sticker.js';
+import { GroupHandler } from './src/handlers/groupHandler.js';
+import { WelcomeHandler } from './src/handlers/welcomeHandler.js';
+
+const startTime = Date.now();
+
+class StickerBot {
+    constructor() {
+        this.sock = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 3;
+        this.reconnectDelay = 5000;
+        this.isConnected = false;
+        this.isConnecting = false;
+        this.connectionStartTime = null;
+        this.autoCodeGenerated = false;
+        
+        this.rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+        
+        console.log('🚀 Iniciando Sticker Bot...');
+        console.log(`📞 Número: ${config.ownerNumber}\n`);
+        this.init();
+    }
+
+    async init() {
+        if (this.isConnecting) {
+            console.log('⚠️ Conexão já em andamento...');
+            return;
+        }
+
+        this.isConnecting = true;
+        console.log('🔄 Iniciando conexão...');
+        
+        try {
+            await WelcomeHandler.init();
+            await GroupHandler.init();
+
+            const { version } = await fetchLatestBaileysVersion();
+            const { state, saveCreds } = await useMultiFileAuthState(config.sessionName);
+            
+            this.sock = makeWASocket({
+                auth: state,
+                version,
+                logger: pino({ level: 'silent' }),
+                browser: Browsers.ubuntu('Chrome'),
+                printQRInTerminal: false,
+                connectTimeoutMs: 30000,
+                defaultQueryTimeoutMs: 30000,
+            });
+
+            this.setupEventHandlers(saveCreds);
+            this.setupTerminalInterface();
+            
+        } catch (error) {
+            console.error('❌ Erro ao inicializar:', error.message);
+            this.isConnecting = false;
+            this.scheduleReconnect();
+        }
+    }
+
+    setupEventHandlers(saveCreds) {
+        this.sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            
+            if (connection === 'open') {
+                this.handleConnectionOpen();
+            } else if (connection === 'close') {
+                this.handleConnectionClose(lastDisconnect);
+            } else if (connection === 'connecting') {
+                console.log('🔄 Conectando ao WhatsApp...');
+                this.isConnecting = true;
+            }
+
+            // QR Code para nova autenticação
+            if (qr) {
+                console.log('\n📱 QR CODE DISPONÍVEL:');
+                qrcode.generate(qr, { small: true });
+                console.log('💡 Escaneie com seu WhatsApp para conectar\n');
+                this.autoCodeGenerated = false;
+            }
+        });
+
+        this.sock.ev.on('creds.update', saveCreds);
+        this.sock.ev.on('messages.upsert', this.handleMessages.bind(this));
+
+        this.sock.ev.on('group-participants.update', (update) => {
+            const { id, participants, action } = update;
+            GroupHandler.handleGroupParticipantsUpdate(
+                { participants, action },
+                this.sock,
+                id
+            );
+        });
+    }
+
+    handleConnectionOpen() {
+        console.log('✅ CONECTADO COM SUCESSO!');
+        this.isConnected = true;
+        this.isConnecting = false;
+        this.reconnectAttempts = 0;
+        this.autoCodeGenerated = false;
+        this.connectionStartTime = Date.now();
+        this.showWelcomeMessage();
+    }
+
+    handleConnectionClose(lastDisconnect) {
+        this.isConnected = false;
+        this.isConnecting = false;
+        
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        console.log(`\n🔌 Conexão fechada. Código: ${statusCode}`);
+        
+        if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+            console.log('🔄 Sessão expirada. Limpando e tentando nova conexão...');
+            this.clearSession();
+            return;
+        }
+
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            console.log(`🔁 Tentativa ${this.reconnectAttempts}/${this.maxReconnectAttempts} em ${this.reconnectDelay/1000}s`);
+            this.scheduleReconnect();
+        } else {
+            console.log('❌ Máximo de tentativas. Use "restart".');
+        }
+    }
+
+    async clearSession() {
+        try {
+            console.log('🧹 Limpando sessão expirada...');
+            await fs.rm(config.sessionName, { recursive: true, force: true });
+            console.log('✅ Sessão limpa. Reconectando...');
+            
+            setTimeout(() => {
+                this.isConnecting = false;
+                this.reconnectAttempts = 0;
+                this.autoCodeGenerated = false;
+                this.init();
+            }, 2000);
+            
+        } catch (error) {
+            console.log('⚠️ Erro ao limpar sessão:', error.message);
+            setTimeout(() => {
+                this.isConnecting = false;
+                this.reconnectAttempts = 0;
+                this.autoCodeGenerated = false;
+                this.init();
+            }, 2000);
+        }
+    }
+
+    scheduleReconnect() {
+        setTimeout(() => {
+            console.log('🔄 Reconectando...');
+            this.isConnecting = false;
+            this.init();
+        }, this.reconnectDelay);
+    }
+
+    async generatePairingCode() {
+        if (this.autoCodeGenerated) {
+            console.log('⚠️ Código já gerado. Aguarde.');
+            return;
+        }
+
+        if (this.isConnected) {
+            console.log('✅ Já conectado!');
+            return;
+        }
+
+        if (!this.sock) {
+            console.log('❌ Socket não pronto.');
+            return;
+        }
+
+        try {
+            console.log('\n📱 SOLICITANDO CÓDIGO...');
+            
+            const cleanNumber = config.ownerNumber.replace(/\D/g, '');
+            
+            if (!cleanNumber || cleanNumber.length < 10) {
+                console.log('❌ Número inválido.');
+                return;
+            }
+
+            console.log(`📟 Número: ${cleanNumber}`);
+            
+            this.autoCodeGenerated = true;
+            const code = await this.sock.requestPairingCode(cleanNumber);
+            
+            console.log('\n✅ CÓDIGO GERADO!');
+            console.log('══════════════════════════════');
+            console.log(`📟 CÓDIGO: ${code}`);
+            console.log('══════════════════════════════');
+            console.log('\n📝 INSTRUÇÕES:');
+            console.log('1. WhatsApp → Menu → Dispositivos conectados');
+            console.log('2. "Conectar um dispositivo"');
+            console.log(`3. Digite: ${code}`);
+            console.log('\n⏰ Válido por 5 minutos\n');
+            
+        } catch (error) {
+            console.log('❌ Erro ao gerar código:', error.message);
+            console.log('💡 Escaneie o QR code que aparecerá automaticamente\n');
+            this.autoCodeGenerated = false;
+        }
+    }
+
+    setupTerminalInterface() {
+        console.log(`
+╔══════════════════════════════╗
+║         STICKER BOT          ║
+║   Conexão por QR + Código    ║
+╠══════════════════════════════╣
+║ 📝 Comandos:                 ║
+║ • code    - Gerar código     ║
+║ • restart - Reiniciar        ║
+║ • clear   - Limpar sessão    ║
+║ • status  - Info conexão     ║
+║ • help    - Ajuda            ║
+║ • exit    - Sair             ║
+╚══════════════════════════════╝
+        `);
+
+        this.rl.on('line', (input) => {
+            const command = input.trim().toLowerCase();
+            
+            switch (command) {
+                case 'code':
+                    this.generatePairingCode();
+                    break;
+                case 'restart':
+                    console.log('🔄 Reiniciando...');
+                    this.restartBot();
+                    break;
+                case 'clear':
+                    console.log('🧹 Limpando sessão...');
+                    this.clearSession();
+                    break;
+                case 'status':
+                    this.showStatus();
+                    break;
+                case 'exit':
+                    console.log('👋 Saindo...');
+                    this.shutdown();
+                    break;
+                case 'help':
+                    this.showHelp();
+                    break;
+                default:
+                    console.log('❌ Comando inválido. Digite "help" para ver os comandos.');
+            }
+        });
+    }
+
+    async restartBot() {
+        this.isConnecting = false;
+        this.reconnectAttempts = 0;
+        this.autoCodeGenerated = false;
+        if (this.sock) {
+            await this.sock.end();
+        }
+        setTimeout(() => this.init(), 2000);
+    }
+
+    async shutdown() {
+        if (this.sock) {
+            await this.sock.end();
+        }
+        process.exit(0);
+    }
+
+    showStatus() {
+        const now = Date.now();
+        const uptime = now - startTime;
+        const connectionUptime = this.connectionStartTime ? now - this.connectionStartTime : 0;
+        
+        console.log(`
+🏓 STATUS DO BOT
+
+📊 Tempos:
+• Bot: ${this.formatTime(uptime)}
+• Conexão: ${this.isConnected ? this.formatTime(connectionUptime) : '❌ Offline'}
+
+🔗 Conexão:
+• Status: ${this.isConnected ? '✅ Conectado' : this.isConnecting ? '🔄 Conectando' : '❌ Offline'}
+• Tentativas: ${this.reconnectAttempts}/${this.maxReconnectAttempts}
+        `);
+    }
+
+    formatTime(ms) {
+        const seconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        
+        if (hours > 0) return `${hours}h ${minutes % 60}m`;
+        if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+        return `${seconds}s`;
+    }
+
+    showHelp() {
+        console.log(`
+🤖 AJUDA - STICKER BOT
+
+📌 COMANDOS DO TERMINAL:
+• code    - Gerar código alfanumérico
+• restart - Reiniciar o bot
+• clear   - Limpar sessão expirada
+• status  - Ver status da conexão
+• exit    - Sair do bot
+• help    - Ver esta ajuda
+
+🔑 COMO CONECTAR:
+
+Opção 1: QR CODE (Automático)
+• Aguarde o QR code aparecer
+• Abra WhatsApp → Menu → Dispositivos conectados
+• Clique em "Conectar um dispositivo"
+• Escaneie o QR code
+
+Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
+• Digite: code
+• Copie o código gerado
+• Abra WhatsApp → Menu → Dispositivos conectados
+• Clique em "Conectar um dispositivo"
+• Digite o código
+
+🔧 SOLUÇÃO PARA ERRO 401:
+• Use "clear" para limpar sessão expirada
+• Ou o bot faz automaticamente
+• Depois gere um novo código com "code"
+
+📞 Número: ${config.ownerNumber}
+        `);
+    }
+
+    showWelcomeMessage() {
+        console.log(`
+╔══════════════════════════════╗
+║         STICKER BOT          ║
+║      ✅ CONECTADO!           ║
+╠══════════════════════════════╣
+║ 🤖 Pronto para uso!          ║
+║ 📝 Comandos via !help        ║
+║ 💬 Terminal: help            ║
+╚══════════════════════════════╝
+        `);
+    }
+
+    async handleMessages({ messages }) {
+        if (!this.isConnected) return;
+        
+        try {
+            const message = messages[0];
+            if (!message.message || message.key.remoteJid === 'status@broadcast') return;
+
+            const text = this.getMessageText(message);
+            const command = text?.toLowerCase().split(' ')[0];
+            const isGroup = message.key.remoteJid.includes('@g.us');
+            const groupJid = message.key.remoteJid;
+
+            console.log(`📨 ${text?.substring(0, 40) || '(mídia)'}`);
+
+            // !setwelcome
+            if (command === '!onwelcome' || command === '!setbemvindo') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+
+                let stickerBuffer = null;
+                let stickerSource = null;
+
+                const quotedMessage = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                if (quotedMessage?.stickerMessage) {
+                    stickerBuffer = quotedMessage.stickerMessage;
+                    stickerSource = 'respondida';
+                }
+                
+                if (!stickerBuffer && message.message?.stickerMessage) {
+                    stickerBuffer = message.message.stickerMessage;
+                    stickerSource = 'atual';
+                }
+
+                if (!stickerBuffer) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: `📝 Responda a uma FIGURINHA e digite: !setwelcome`
+                    }, { quoted: message });
+                    return;
+                }
+
+                try {
+                    console.log(`💾 Salvando figurinha (${stickerSource})...`);
+                    
+                    const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
+                    
+                    const stream = await downloadContentFromMessage(stickerBuffer, 'sticker');
+                    let buffer = Buffer.from([]);
+                    
+                    for await (const chunk of stream) {
+                        buffer = Buffer.concat([buffer, chunk]);
+                    }
+                    
+                    const success = await WelcomeHandler.saveWelcomeSticker(groupJid, buffer, 'sticker');
+                    
+                    if (success) {
+                        await this.sock.sendMessage(groupJid, {
+                            text: '✅ Figurinha salva!\n\n🎉 Welcome ativado'
+                        }, { quoted: message });
+                    } else {
+                        await this.sock.sendMessage(groupJid, {
+                            text: '❌ Erro ao salvar figurinha'
+                        }, { quoted: message });
+                    }
+                    
+                } catch (error) {
+                    console.error('❌ Erro:', error);
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Erro ao processar figurinha'
+                    }, { quoted: message });
+                }
+                return;
+            }
+
+            // !disablewelcome
+            if (command === '!ofwelcome' || command === '!desativarwelcome') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+
+                await WelcomeHandler.disableWelcome(groupJid);
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: '✅ Welcome desativado'
+                }, { quoted: message });
+                return;
+            }
+
+            // !welcomestatus
+            if (command === '!welcomestatus' || command === '!statuswelcome') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+
+                const status = WelcomeHandler.getWelcomeStatus(groupJid);
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: status
+                }, { quoted: message });
+                return;
+            }
+
+            // !enableban
+            if (command === '!enableban' || command === '!onban') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+
+                GroupHandler.enableBan(groupJid);
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: '🔨 Ban ATIVADO\n\n❌ Gringos serão banidos'
+                }, { quoted: message });
+                return;
+            }
+
+            // !disableban
+            if (command === '!disableban' || command === '!ofban') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+
+                GroupHandler.disableBan(groupJid);
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: '🔓 Ban DESATIVADO\n\n✅ Todos podem entrar'
+                }, { quoted: message });
+                return;
+            }
+
+            // !banstatus
+            if (command === '!banstatus' || command === '!statusban') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+
+                const status = GroupHandler.getBanStatus(groupJid);
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: status
+                }, { quoted: message });
+                return;
+            }
+
+            // Outros comandos
+            if (command === '!fig' || command === '!sticker' || command === '!s' ) {
+                await stickerPlugin(this.sock, message);
+            } else if (command === '!help') {
+                const text = `
+🤖 AJUDA
+
+🎉 WELCOME:
+• !setwelcome - Configurar
+• !disablewelcome - Desativar
+• !welcomestatus - Status
+
+🔨 BAN:
+• !enableban - Ativar
+• !disableban - Desativar
+• !banstatus - Status
+
+🎨 FIGURINHAS:
+• !fig - Criar figurinha
+• !sticker - Criar figurinha
+• !s - Atalho
+                `;
+                await this.sock.sendMessage(groupJid, { text }, { quoted: message });
+            }
+
+        } catch (error) {
+            console.log('❌ Erro:', error.message);
+        }
+    }
+
+    getMessageText(message) {
+        const msg = message.message;
+        return (
+            msg?.conversation ||
+            msg?.imageMessage?.caption ||
+            msg?.videoMessage?.caption ||
+            msg?.extendedTextMessage?.text
+        );
+    }
+}
+
+console.log('🎯 Iniciando bot...');
+console.log('💡 Aguarde o QR code ou digite "code" para código alfanumérico\n');
+new StickerBot();
