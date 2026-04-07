@@ -518,30 +518,48 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 return;
             }
 
+
+// !toimg - Converter figurinha para imagem
+if (command === '!toimg' || command === '!toimage' || command === '!figimg') {
+    const { ToImageHandler } = await import('./src/handlers/toImageHandler.js');
+    const result = await ToImageHandler.convertStickerToImage(message, this.sock);
+    
+    if (!result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: result.error
+        }, { quoted: message });
+    }
+    return;
+}
             // Outros comandos
             if (command === '!fig' || command === '!sticker' || command === '!s' ) {
                 await stickerPlugin(this.sock, message);
-            } else if (command === '!help') {
-                const text = `
-🤖 AJUDA
+// No comando !help, atualize o texto:
 
-🎉 WELCOME:
-• !setwelcome - Configurar
-• !disablewelcome - Desativar
-• !welcomestatus - Status
-
-🔨 BAN:
-• !enableban - Ativar
-• !disableban - Desativar
-• !banstatus - Status
+if (command === '!help') {
+    const text = `
+🤖 AJUDA - STICKER BOT
 
 🎨 FIGURINHAS:
-• !fig - Criar figurinha
-• !sticker - Criar figurinha
-• !s - Atalho
-                `;
-                await this.sock.sendMessage(groupJid, { text }, { quoted: message });
-            }
+• !fig / !sticker / !s - Criar figurinha
+• !toimg / !toimage - Converter figurinha para imagem
+
+🎉 WELCOME:
+• !setwelcome - Configurar sticker de boas-vindas
+• !disablewelcome - Desativar welcome
+• !welcomestatus - Status do welcome
+
+🔨 BAN:
+• !enableban - Ativar ban de gringos
+• !disableban - Desativar ban de gringos
+• !banstatus - Status do ban
+
+📌 EXEMPLOS:
+• Envie uma imagem com !fig
+• Responda uma figurinha com !toimg
+    `;
+    await this.sock.sendMessage(groupJid, { text }, { quoted: message });
+}
 
         } catch (error) {
             console.log('❌ Erro:', error.message);
