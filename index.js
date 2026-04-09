@@ -530,8 +530,21 @@ if (command === '!toimg' || command === '!toimage' || command === '!figimg') {
         }, { quoted: message });
     }
     return;
-}
             // Outros comandos
+}
+
+if (command === '!removebg' || command === '!bg') {
+    const { RemoveBgHandler } = await import('./src/handlers/removeBgHandler.js');
+    const result = await RemoveBgHandler.removeBackground(message, this.sock);
+    
+    if (!result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: result.error
+        }, { quoted: message });
+    }
+    return;
+}
+
             if (command === '!fig' || command === '!sticker' || command === '!s' ) {
                 await stickerPlugin(this.sock, message);
 // No comando !help, atualize o texto:
@@ -543,6 +556,7 @@ if (command === '!help') {
 🎨 FIGURINHAS:
 • !fig / !sticker / !s - Criar figurinha
 • !toimg / !toimage - Converter figurinha para imagem
+•!bg / !removebg - criar sticker sem fundo
 
 🎉 WELCOME:
 • !setwelcome - Configurar sticker de boas-vindas
