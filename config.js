@@ -8,8 +8,11 @@ export const config = {
     prefix: '!',
     ownerNumber: 'SEU_NUMERO',
     botName: 'StickerBot',
-      // API Keys
-    removeBgApiKey: 'peque sua chave remove.bg', 
+         // 🔑 API KEYS (Remove.bg)
+    // ========================================
+    removeBgApiKeys: [
+        'SUA_API1','SUA_API2','SUA_API3'
+    ],
     
     // ========================================
     // 📊 LIMITES DE MÍDIA
