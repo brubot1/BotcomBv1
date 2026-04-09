@@ -8,7 +8,8 @@ import { config } from './config.js';
 import { stickerPlugin } from './plugins/sticker.js';
 import { GroupHandler } from './src/handlers/groupHandler.js';
 import { WelcomeHandler } from './src/handlers/welcomeHandler.js';
-
+// No topo do arquivo, junto com os outros imports
+import { StickerPackHandler } from './src/handlers/stickerPackHandler.js';
 const startTime = Date.now();
 
 class StickerBot {
@@ -44,7 +45,8 @@ class StickerBot {
         try {
             await WelcomeHandler.init();
             await GroupHandler.init();
-
+// Dentro do constructor, após as outras inicializações
+await StickerPackHandler.init();
             const { version } = await fetchLatestBaileysVersion();
             const { state, saveCreds } = await useMultiFileAuthState(config.sessionName);
             
@@ -544,7 +546,182 @@ if (command === '!removebg' || command === '!bg') {
     }
     return;
 }
+// !addsticker - Salvar figurinha (apenas admin)
+if (command === '!addsticker' || command === '!addfig') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Verificar se é admin
+    const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+    
+    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Apenas administradores do grupo podem adicionar figurinhas'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Extrair nome do pacote
+    const args = text.split(' ');
+    const packName = args[1];
+    
+    if (!packName) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Use: !addsticker [nome do pacote]\n\n📌 Exemplo: !addsticker reacoes\n\nDepois responda a figurinha que quer salvar'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Baixar sticker
+    const stickerBuffer = await StickerPackHandler.downloadSticker(message);
+    
+    if (!stickerBuffer) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Responda a uma FIGURINHA com o comando !addsticker\n\n📌 Exemplo: Responda uma figurinha com !addsticker reacoes'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Salvar
+    const result = await StickerPackHandler.saveSticker(packName, stickerBuffer, message, this.sock);
+    
+    if (result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: `✅ Figurinha salva!\n\n📦 Pacote: ${result.packName}\n🆔 ID: ${result.fileName}\n📊 Total: ${result.total} figurinhas`
+        }, { quoted: message });
+    } else {
+        await this.sock.sendMessage(groupJid, {
+            text: result.error
+        }, { quoted: message });
+    }
+    return;
+}
 
+// !pack - Enviar figurinhas de um pacote
+if (command === '!pack') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    const args = text.split(' ');
+    const packName = args[1];
+    let quantity = parseInt(args[2]) || 1;
+    
+    if (!packName) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Use: !pack [nome do pacote] [quantidade]\n\n📌 Exemplo: !pack reacoes\n📌 Exemplo: !pack reacoes 3'
+        }, { quoted: message });
+        return;
+    }
+    
+    const result = await StickerPackHandler.sendStickers(this.sock, groupJid, packName, quantity, message);
+    
+    if (!result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: result.error
+        }, { quoted: message });
+    }
+    return;
+}
+
+// !packs - Listar pacotes disponíveis
+if (command === '!packs' || command === '!listpack') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    const packs = await StickerPackHandler.listPacks();
+    
+    if (packs.length === 0) {
+        await this.sock.sendMessage(groupJid, {
+            text: '📦 Nenhum pacote disponível ainda.\n\nAdicione figurinhas com: !addsticker [nome]'
+        }, { quoted: message });
+        return;
+    }
+    
+    let packList = '📦 *PACOTES DISPONÍVEIS*\n\n';
+    for (const pack of packs) {
+        packList += `• *${pack.name}* - ${pack.count} figurinhas\n`;
+    }
+    packList += '\n📌 Use: !pack [nome] para receber\n📌 Use: !pack [nome] 3 para várias';
+    
+    await this.sock.sendMessage(groupJid, {
+        text: packList
+    }, { quoted: message });
+    return;
+}
+
+// !sticker (aleatório)
+if (command === '!sticker' && text === '!sticker') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    const result = await StickerPackHandler.sendRandomSticker(this.sock, groupJid, message);
+    
+    if (!result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: result.error
+        }, { quoted: message });
+    }
+    return;
+}
+
+// !rmsticker - Remover figurinha (apenas admin)
+if (command === '!rmsticker' || command === '!removefig') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Verificar se é admin
+    const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+    
+    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Apenas administradores do grupo podem remover figurinhas'
+        }, { quoted: message });
+        return;
+    }
+    
+    const args = text.split(' ');
+    const stickerId = args[1];
+    
+    if (!stickerId) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Use: !rmsticker [ID]\n\n📌 Exemplo: !rmsticker reacoes_001\n\nUse !packs para ver os IDs'
+        }, { quoted: message });
+        return;
+    }
+    
+    const result = await StickerPackHandler.removeSticker(stickerId, message, this.sock);
+    
+    if (result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: `✅ Figurinha ${result.stickerId} removida do pacote "${result.packName}"`
+        }, { quoted: message });
+    } else {
+        await this.sock.sendMessage(groupJid, {
+            text: result.error
+        }, { quoted: message });
+    }
+    return;
+}
             if (command === '!fig' || command === '!sticker' || command === '!s' ) {
                 await stickerPlugin(this.sock, message);
 // No comando !help, atualize o texto:
@@ -558,6 +735,13 @@ if (command === '!help') {
 • !toimg / !toimage - Converter figurinha para imagem
 •!bg / !removebg - criar sticker sem fundo
 
+📦 PACOTES DE FIGURINHAS:
+• !pack [nome] - Receber figurinha do pacote
+• !pack [nome] 3 - Receber 3 figurinhas
+• !packs - Listar pacotes disponíveis
+• !sticker - Figurinha aleatória
+• !addsticker [nome] - (Admin) Salvar figurinha
+• !rmsticker [ID] - (Admin) Remover figurinha
 🎉 WELCOME:
 • !setwelcome - Configurar sticker de boas-vindas
 • !disablewelcome - Desativar welcome

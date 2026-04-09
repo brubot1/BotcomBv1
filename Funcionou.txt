@@ -5,3 +5,23 @@
 · Sistema de cache inteligente - Sem bloqueios
 · Comandos úteis - !ping, !espaco, !help
 · Reconexão automática - Bot se reconecta sozinho
+//9 de abr. 2016
+· comando !toimg adicionado
+· comando !bg (isso tira o fundo da imagem e faz o sticker sem fundo
+· comando sticker em data base adicionado
+Como usar:
+
+Admin:
+
+1. !addsticker reacoes - Depois responde uma figurinha
+2. !packs - Ver todos os pacotes
+3. !rmsticker reacoes_001 - Remove figurinha
+
+Qualquer membro:
+
+1. !packs - Ver pacotes disponíveis
+2. !pack reacoes - Recebe 1 figurinha
+3. !pack reacoes 3 - Recebe 3 figurinhas
+4. !sticker - Figurinha aleatória
+· 
+· 
