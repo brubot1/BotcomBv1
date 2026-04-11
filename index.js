@@ -8,7 +8,8 @@ import { config } from './config.js';
 import { stickerPlugin } from './plugins/sticker.js';
 import { GroupHandler } from './src/handlers/groupHandler.js';
 import { WelcomeHandler } from './src/handlers/welcomeHandler.js';
-// No topo do arquivo, junto com os outros imports
+import { MenuHandler } from './src/handlers/menuHandler.js';
+import { CircleHandler } from './src/handlers/circleHandler.js';
 import { StickerPackHandler } from './src/handlers/stickerPackHandler.js';
 const startTime = Date.now();
 
@@ -45,6 +46,7 @@ class StickerBot {
         try {
             await WelcomeHandler.init();
             await GroupHandler.init();
+            await menuHandler.init();
 // Dentro do constructor, após as outras inicializações
 await StickerPackHandler.init();
             const { version } = await fetchLatestBaileysVersion();
@@ -660,7 +662,121 @@ if (command === '!packs' || command === '!listpack') {
     }, { quoted: message });
     return;
 }
+// !setmenu - Definir imagem do menu (admin)
+if (command === '!setmenu') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Verificar se é admin
+    const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+    
+    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Apenas administradores podem definir a imagem do menu'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Baixar imagem
+    const imageBuffer = await MenuHandler.downloadImage(message);
+    
+    if (!imageBuffer) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Responda a uma IMAGEM com !setmenu\n\n📌 Exemplo: Envie uma imagem e responda com !setmenu'
+        }, { quoted: message });
+        return;
+    }
+    
+    const result = await MenuHandler.saveMenuImage(groupJid, imageBuffer);
+    
+    if (result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: '✅ Imagem do menu salva!\n\nUse !menu para ver o novo menu'
+        }, { quoted: message });
+    } else {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Erro ao salvar imagem'
+        }, { quoted: message });
+    }
+    return;
+}
 
+// !delmenu - Remover imagem do menu (admin)
+if (command === '!delmenu') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    // Verificar se é admin
+    const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+    
+    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Apenas administradores podem remover a imagem do menu'
+        }, { quoted: message });
+        return;
+    }
+    
+    await MenuHandler.deleteMenuImage(groupJid);
+    
+    await this.sock.sendMessage(groupJid, {
+        text: '✅ Imagem do menu removida! O menu voltará ao formato texto.'
+    }, { quoted: message });
+    return;
+}
+
+// !menu - Mostrar menu
+if (command === '!menu') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    const menuText = MenuHandler.getMenuText();
+    const menuImage = await MenuHandler.getMenuImage(groupJid);
+    
+    if (menuImage) {
+        // Enviar com imagem
+        await this.sock.sendMessage(groupJid, {
+            image: menuImage,
+            caption: menuText
+        }, { quoted: message });
+    } else {
+        // Enviar só texto
+        await this.sock.sendMessage(groupJid, {
+            text: menuText
+        }, { quoted: message });
+    }
+    return;
+}
+
+// !scircle - Sticker redondo
+if (command === '!scircle' || command === '!circle' || command === '!redondo') {
+    if (!isGroup) {
+        await this.sock.sendMessage(groupJid, {
+            text: '❌ Este comando só funciona em grupos'
+        }, { quoted: message });
+        return;
+    }
+    
+    const result = await CircleHandler.createCircleSticker(message, this.sock);
+    
+    if (!result.success) {
+        await this.sock.sendMessage(groupJid, {
+            text: result.error
+        }, { quoted: message });
+    }
+    return;
+}
 // !sticker (aleatório)
 if (command === '!sticker' && text === '!sticker') {
     if (!isGroup) {
@@ -734,6 +850,7 @@ if (command === '!help') {
 • !fig / !sticker / !s - Criar figurinha
 • !toimg / !toimage - Converter figurinha para imagem
 •!bg / !removebg - criar sticker sem fundo
+•!scircle /!redondo - criar sticker redondo
 
 📦 PACOTES DE FIGURINHAS:
 • !pack [nome] - Receber figurinha do pacote
