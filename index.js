@@ -1,4 +1,3 @@
-//COMPLETO - COM CÓDIGO ALFANUMÉRICO
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
@@ -11,6 +10,8 @@ import { WelcomeHandler } from './src/handlers/welcomeHandler.js';
 import { MenuHandler } from './src/handlers/menuHandler.js';
 import { CircleHandler } from './src/handlers/circleHandler.js';
 import { StickerPackHandler } from './src/handlers/stickerPackHandler.js';
+import { AntiLinkHandler } from './src/handlers/antiLinkHandler.js';
+
 const startTime = Date.now();
 
 class StickerBot {
@@ -46,9 +47,10 @@ class StickerBot {
         try {
             await WelcomeHandler.init();
             await GroupHandler.init();
-            await menuHandler.init();
-// Dentro do constructor, após as outras inicializações
-await StickerPackHandler.init();
+            await MenuHandler.init();
+            await StickerPackHandler.init();
+            await AntiLinkHandler.init();
+            
             const { version } = await fetchLatestBaileysVersion();
             const { state, saveCreds } = await useMultiFileAuthState(config.sessionName);
             
@@ -85,7 +87,6 @@ await StickerPackHandler.init();
                 this.isConnecting = true;
             }
 
-            // QR Code para nova autenticação
             if (qr) {
                 console.log('\n📱 QR CODE DISPONÍVEL:');
                 qrcode.generate(qr, { small: true });
@@ -371,10 +372,140 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
             const command = text?.toLowerCase().split(' ')[0];
             const isGroup = message.key.remoteJid.includes('@g.us');
             const groupJid = message.key.remoteJid;
+            const senderNumber = message.key.participant || message.key.remoteJid;
 
             console.log(`📨 ${text?.substring(0, 40) || '(mídia)'}`);
 
-            // !setwelcome
+            // ========================================
+            // 🔗 ANTI-LINK - Verificar links (ANTES dos comandos)
+            // ========================================
+            if (isGroup && text && !command?.startsWith('!')) {
+                const isAdminUser = await AntiLinkHandler.isAdmin(this.sock, groupJid, senderNumber);
+                
+                if (!isAdminUser) {
+                    const check = await AntiLinkHandler.checkMessage(text, groupJid, senderNumber);
+                    
+                    if (check.blocked) {
+                        console.log(`🚫 Link bloqueado: ${check.domain} de ${senderNumber}`);
+                        
+                        await this.sock.sendMessage(groupJid, {
+                            delete: message.key
+                        });
+                        
+                        const warnMsg = AntiLinkHandler.getWarningMessage(check.action, check.domain);
+                        await this.sock.sendMessage(groupJid, {
+                            text: warnMsg
+                        });
+                        
+                        if (check.action === 'kick') {
+                            await AntiLinkHandler.kickUser(this.sock, groupJid, senderNumber);
+                            await this.sock.sendMessage(groupJid, {
+                                text: `🔨 Usuário removido por enviar link proibido: ${check.domain}`
+                            });
+                        }
+                        
+                        return;
+                    }
+                }
+            }
+
+            // ========================================
+            // 📌 COMANDOS DO ANTI-LINK
+            // ========================================
+            if (command === '!antilink') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const isAdminUser = await AntiLinkHandler.isAdmin(this.sock, groupJid, senderNumber);
+                if (!isAdminUser) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas administradores podem configurar o anti-link'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const args = text.split(' ');
+                const subCommand = args[1];
+                
+                if (subCommand === 'on') {
+                    await AntiLinkHandler.setEnabled(groupJid, true);
+                    await this.sock.sendMessage(groupJid, {
+                        text: '✅ Anti-link ATIVADO!'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                if (subCommand === 'off') {
+                    await AntiLinkHandler.setEnabled(groupJid, false);
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Anti-link DESATIVADO!'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                if (subCommand === 'action') {
+                    const action = args[2];
+                    if (!action) {
+                        await this.sock.sendMessage(groupJid, {
+                            text: '❌ Use: !antilink action delete/warn/kick'
+                        }, { quoted: message });
+                        return;
+                    }
+                    
+                    const result = await AntiLinkHandler.setAction(groupJid, action);
+                    if (result.success) {
+                        const actionText = action === 'delete' ? 'deletar mensagem' : action === 'warn' ? 'avisar' : 'remover usuário';
+                        await this.sock.sendMessage(groupJid, {
+                            text: `✅ Ação alterada para: ${actionText}`
+                        }, { quoted: message });
+                    } else {
+                        await this.sock.sendMessage(groupJid, {
+                            text: result.error
+                        }, { quoted: message });
+                    }
+                    return;
+                }
+                
+                if (subCommand === 'status') {
+                    const status = await AntiLinkHandler.getStatus(groupJid);
+                    await this.sock.sendMessage(groupJid, {
+                        text: status
+                    }, { quoted: message });
+                    return;
+                }
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: `🔗 *COMANDOS ANTI-LINK*\n\n` +
+                          `• !antilink on - Ativar\n` +
+                          `• !antilink off - Desativar\n` +
+                          `• !antilink action delete/warn/kick - Ação\n` +
+                          `• !antilink status - Ver status`
+                }, { quoted: message });
+                return;
+            }
+
+            // ========================================
+            // 🏓 COMANDO !ping
+            // ========================================
+            if (command === '!ping') {
+                const start = Date.now();
+                await this.sock.sendMessage(groupJid, {
+                    text: '🏓 Pong!'
+                }, { quoted: message });
+                const end = Date.now();
+                await this.sock.sendMessage(groupJid, {
+                    text: `⏱️ Latência: ${end - start}ms`
+                }, { quoted: message });
+                return;
+            }
+
+            // ========================================
+            // 🎉 WELCOME
+            // ========================================
             if (command === '!onwelcome' || command === '!setbemvindo') {
                 if (!isGroup) {
                     await this.sock.sendMessage(groupJid, {
@@ -384,17 +515,14 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 }
 
                 let stickerBuffer = null;
-                let stickerSource = null;
 
                 const quotedMessage = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 if (quotedMessage?.stickerMessage) {
                     stickerBuffer = quotedMessage.stickerMessage;
-                    stickerSource = 'respondida';
                 }
                 
                 if (!stickerBuffer && message.message?.stickerMessage) {
                     stickerBuffer = message.message.stickerMessage;
-                    stickerSource = 'atual';
                 }
 
                 if (!stickerBuffer) {
@@ -405,8 +533,6 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 }
 
                 try {
-                    console.log(`💾 Salvando figurinha (${stickerSource})...`);
-                    
                     const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
                     
                     const stream = await downloadContentFromMessage(stickerBuffer, 'sticker');
@@ -437,7 +563,6 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 return;
             }
 
-            // !disablewelcome
             if (command === '!ofwelcome' || command === '!desativarwelcome') {
                 if (!isGroup) {
                     await this.sock.sendMessage(groupJid, {
@@ -454,7 +579,6 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 return;
             }
 
-            // !welcomestatus
             if (command === '!welcomestatus' || command === '!statuswelcome') {
                 if (!isGroup) {
                     await this.sock.sendMessage(groupJid, {
@@ -471,7 +595,9 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 return;
             }
 
-            // !enableban
+            // ========================================
+            // 🔨 BAN
+            // ========================================
             if (command === '!enableban' || command === '!onban') {
                 if (!isGroup) {
                     await this.sock.sendMessage(groupJid, {
@@ -488,7 +614,6 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 return;
             }
 
-            // !disableban
             if (command === '!disableban' || command === '!ofban') {
                 if (!isGroup) {
                     await this.sock.sendMessage(groupJid, {
@@ -505,7 +630,6 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 return;
             }
 
-            // !banstatus
             if (command === '!banstatus' || command === '!statusban') {
                 if (!isGroup) {
                     await this.sock.sendMessage(groupJid, {
@@ -522,335 +646,333 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                 return;
             }
 
+            // ========================================
+            // 🎨 FIGURINHAS
+            // ========================================
+            if (command === '!toimg' || command === '!toimage' || command === '!figimg') {
+                const { ToImageHandler } = await import('./src/handlers/toImageHandler.js');
+                const result = await ToImageHandler.convertStickerToImage(message, this.sock);
+                
+                if (!result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: result.error
+                    }, { quoted: message });
+                }
+                return;
+            }
 
-// !toimg - Converter figurinha para imagem
-if (command === '!toimg' || command === '!toimage' || command === '!figimg') {
-    const { ToImageHandler } = await import('./src/handlers/toImageHandler.js');
-    const result = await ToImageHandler.convertStickerToImage(message, this.sock);
-    
-    if (!result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: result.error
-        }, { quoted: message });
-    }
-    return;
-            // Outros comandos
-}
+            if (command === '!removebg' || command === '!bg') {
+                const { RemoveBgHandler } = await import('./src/handlers/removeBgHandler.js');
+                const result = await RemoveBgHandler.removeBackground(message, this.sock);
+                
+                if (!result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: result.error
+                    }, { quoted: message });
+                }
+                return;
+            }
 
-if (command === '!removebg' || command === '!bg') {
-    const { RemoveBgHandler } = await import('./src/handlers/removeBgHandler.js');
-    const result = await RemoveBgHandler.removeBackground(message, this.sock);
-    
-    if (!result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: result.error
-        }, { quoted: message });
-    }
-    return;
-}
-// !addsticker - Salvar figurinha (apenas admin)
-if (command === '!addsticker' || command === '!addfig') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Verificar se é admin
-    const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
-    
-    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Apenas administradores do grupo podem adicionar figurinhas'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Extrair nome do pacote
-    const args = text.split(' ');
-    const packName = args[1];
-    
-    if (!packName) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Use: !addsticker [nome do pacote]\n\n📌 Exemplo: !addsticker reacoes\n\nDepois responda a figurinha que quer salvar'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Baixar sticker
-    const stickerBuffer = await StickerPackHandler.downloadSticker(message);
-    
-    if (!stickerBuffer) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Responda a uma FIGURINHA com o comando !addsticker\n\n📌 Exemplo: Responda uma figurinha com !addsticker reacoes'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Salvar
-    const result = await StickerPackHandler.saveSticker(packName, stickerBuffer, message, this.sock);
-    
-    if (result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Figurinha salva!\n\n📦 Pacote: ${result.packName}\n🆔 ID: ${result.fileName}\n📊 Total: ${result.total} figurinhas`
-        }, { quoted: message });
-    } else {
-        await this.sock.sendMessage(groupJid, {
-            text: result.error
-        }, { quoted: message });
-    }
-    return;
-}
+            if (command === '!scircle' || command === '!circle' || command === '!redondo') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const result = await CircleHandler.createCircleSticker(message, this.sock);
+                
+                if (!result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: result.error
+                    }, { quoted: message });
+                }
+                return;
+            }
 
-// !pack - Enviar figurinhas de um pacote
-if (command === '!pack') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    const args = text.split(' ');
-    const packName = args[1];
-    let quantity = parseInt(args[2]) || 1;
-    
-    if (!packName) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Use: !pack [nome do pacote] [quantidade]\n\n📌 Exemplo: !pack reacoes\n📌 Exemplo: !pack reacoes 3'
-        }, { quoted: message });
-        return;
-    }
-    
-    const result = await StickerPackHandler.sendStickers(this.sock, groupJid, packName, quantity, message);
-    
-    if (!result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: result.error
-        }, { quoted: message });
-    }
-    return;
-}
+            // ========================================
+            // 📦 PACOTES DE STICKERS
+            // ========================================
+            if (command === '!addsticker' || command === '!addfig') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+                
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas administradores do grupo podem adicionar figurinhas'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const args = text.split(' ');
+                const packName = args[1];
+                
+                if (!packName) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Use: !addsticker [nome do pacote]\n\n📌 Exemplo: !addsticker reacoes'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const stickerBuffer = await StickerPackHandler.downloadSticker(message);
+                
+                if (!stickerBuffer) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Responda a uma FIGURINHA com o comando !addsticker'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const result = await StickerPackHandler.saveSticker(packName, stickerBuffer, message, this.sock);
+                
+                if (result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: `✅ Figurinha salva!\n\n📦 Pacote: ${result.packName}\n🆔 ID: ${result.fileName}\n📊 Total: ${result.total} figurinhas`
+                    }, { quoted: message });
+                } else {
+                    await this.sock.sendMessage(groupJid, {
+                        text: result.error
+                    }, { quoted: message });
+                }
+                return;
+            }
 
-// !packs - Listar pacotes disponíveis
-if (command === '!packs' || command === '!listpack') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    const packs = await StickerPackHandler.listPacks();
-    
-    if (packs.length === 0) {
-        await this.sock.sendMessage(groupJid, {
-            text: '📦 Nenhum pacote disponível ainda.\n\nAdicione figurinhas com: !addsticker [nome]'
-        }, { quoted: message });
-        return;
-    }
-    
-    let packList = '📦 *PACOTES DISPONÍVEIS*\n\n';
-    for (const pack of packs) {
-        packList += `• *${pack.name}* - ${pack.count} figurinhas\n`;
-    }
-    packList += '\n📌 Use: !pack [nome] para receber\n📌 Use: !pack [nome] 3 para várias';
-    
-    await this.sock.sendMessage(groupJid, {
-        text: packList
-    }, { quoted: message });
-    return;
-}
-// !setmenu - Definir imagem do menu (admin)
-if (command === '!setmenu') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Verificar se é admin
-    const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
-    
-    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Apenas administradores podem definir a imagem do menu'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Baixar imagem
-    const imageBuffer = await MenuHandler.downloadImage(message);
-    
-    if (!imageBuffer) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Responda a uma IMAGEM com !setmenu\n\n📌 Exemplo: Envie uma imagem e responda com !setmenu'
-        }, { quoted: message });
-        return;
-    }
-    
-    const result = await MenuHandler.saveMenuImage(groupJid, imageBuffer);
-    
-    if (result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: '✅ Imagem do menu salva!\n\nUse !menu para ver o novo menu'
-        }, { quoted: message });
-    } else {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Erro ao salvar imagem'
-        }, { quoted: message });
-    }
-    return;
-}
+            if (command === '!pack') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const args = text.split(' ');
+                const packName = args[1];
+                let quantity = parseInt(args[2]) || 1;
+                
+                if (!packName) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Use: !pack [nome do pacote] [quantidade]\n\n📌 Exemplo: !pack reacoes\n📌 Exemplo: !pack reacoes 3'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const result = await StickerPackHandler.sendStickers(this.sock, groupJid, packName, quantity, message);
+                
+                if (!result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: result.error
+                    }, { quoted: message });
+                }
+                return;
+            }
 
-// !delmenu - Remover imagem do menu (admin)
-if (command === '!delmenu') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Verificar se é admin
-    const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
-    
-    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Apenas administradores podem remover a imagem do menu'
-        }, { quoted: message });
-        return;
-    }
-    
-    await MenuHandler.deleteMenuImage(groupJid);
-    
-    await this.sock.sendMessage(groupJid, {
-        text: '✅ Imagem do menu removida! O menu voltará ao formato texto.'
-    }, { quoted: message });
-    return;
-}
+            if (command === '!packs' || command === '!listpack') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const packs = await StickerPackHandler.listPacks();
+                
+                if (packs.length === 0) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '📦 Nenhum pacote disponível ainda.\n\nAdicione figurinhas com: !addsticker [nome]'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                let packList = '📦 *PACOTES DISPONÍVEIS*\n\n';
+                for (const pack of packs) {
+                    packList += `• *${pack.name}* - ${pack.count} figurinhas\n`;
+                }
+                packList += '\n📌 Use: !pack [nome] para receber\n📌 Use: !pack [nome] 3 para várias';
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: packList
+                }, { quoted: message });
+                return;
+            }
 
-// !menu - Mostrar menu
-if (command === '!menu') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    const menuText = MenuHandler.getMenuText();
-    const menuImage = await MenuHandler.getMenuImage(groupJid);
-    
-    if (menuImage) {
-        // Enviar com imagem
-        await this.sock.sendMessage(groupJid, {
-            image: menuImage,
-            caption: menuText
-        }, { quoted: message });
-    } else {
-        // Enviar só texto
-        await this.sock.sendMessage(groupJid, {
-            text: menuText
-        }, { quoted: message });
-    }
-    return;
-}
+            if (command === '!sticker' && text === '!sticker') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const result = await StickerPackHandler.sendRandomSticker(this.sock, groupJid, message);
+                
+                if (!result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: result.error
+                    }, { quoted: message });
+                }
+                return;
+            }
 
-// !scircle - Sticker redondo
-if (command === '!scircle' || command === '!circle' || command === '!redondo') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    const result = await CircleHandler.createCircleSticker(message, this.sock);
-    
-    if (!result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: result.error
-        }, { quoted: message });
-    }
-    return;
-}
-// !sticker (aleatório)
-if (command === '!sticker' && text === '!sticker') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    const result = await StickerPackHandler.sendRandomSticker(this.sock, groupJid, message);
-    
-    if (!result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: result.error
-        }, { quoted: message });
-    }
-    return;
-}
+            if (command === '!rmsticker' || command === '!removefig') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+                
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas administradores do grupo podem remover figurinhas'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const args = text.split(' ');
+                const stickerId = args[1];
+                
+                if (!stickerId) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Use: !rmsticker [ID]\n\n📌 Exemplo: !rmsticker reacoes_001'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const result = await StickerPackHandler.removeSticker(stickerId, message, this.sock);
+                
+                if (result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: `✅ Figurinha ${result.stickerId} removida do pacote "${result.packName}"`
+                    }, { quoted: message });
+                } else {
+                    await this.sock.sendMessage(groupJid, {
+                        text: result.error
+                    }, { quoted: message });
+                }
+                return;
+            }
 
-// !rmsticker - Remover figurinha (apenas admin)
-if (command === '!rmsticker' || command === '!removefig') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    // Verificar se é admin
-    const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
-    
-    if (!isAdminUser && message.key.participant !== config.ownerNumber) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Apenas administradores do grupo podem remover figurinhas'
-        }, { quoted: message });
-        return;
-    }
-    
-    const args = text.split(' ');
-    const stickerId = args[1];
-    
-    if (!stickerId) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Use: !rmsticker [ID]\n\n📌 Exemplo: !rmsticker reacoes_001\n\nUse !packs para ver os IDs'
-        }, { quoted: message });
-        return;
-    }
-    
-    const result = await StickerPackHandler.removeSticker(stickerId, message, this.sock);
-    
-    if (result.success) {
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Figurinha ${result.stickerId} removida do pacote "${result.packName}"`
-        }, { quoted: message });
-    } else {
-        await this.sock.sendMessage(groupJid, {
-            text: result.error
-        }, { quoted: message });
-    }
-    return;
-}
-            if (command === '!fig' || command === '!sticker' || command === '!s' ) {
+            // ========================================
+            // 📌 MENU
+            // ========================================
+            if (command === '!setmenu') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+                
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas administradores podem definir a imagem do menu'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const imageBuffer = await MenuHandler.downloadImage(message);
+                
+                if (!imageBuffer) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Responda a uma IMAGEM com !setmenu'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const result = await MenuHandler.saveMenuImage(groupJid, imageBuffer);
+                
+                if (result.success) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '✅ Imagem do menu salva!\n\nUse !menu para ver o novo menu'
+                    }, { quoted: message });
+                } else {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Erro ao salvar imagem'
+                    }, { quoted: message });
+                }
+                return;
+            }
+
+            if (command === '!delmenu') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
+                
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Apenas administradores podem remover a imagem do menu'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                await MenuHandler.deleteMenuImage(groupJid);
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: '✅ Imagem do menu removida! O menu voltará ao formato texto.'
+                }, { quoted: message });
+                return;
+            }
+
+            if (command === '!menu') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, {
+                        text: '❌ Este comando só funciona em grupos'
+                    }, { quoted: message });
+                    return;
+                }
+                
+                const menuText = MenuHandler.getMenuText();
+                const menuImage = await MenuHandler.getMenuImage(groupJid);
+                
+                if (menuImage) {
+                    await this.sock.sendMessage(groupJid, {
+                        image: menuImage,
+                        caption: menuText
+                    }, { quoted: message });
+                } else {
+                    await this.sock.sendMessage(groupJid, {
+                        text: menuText
+                    }, { quoted: message });
+                }
+                return;
+            }
+
+            // ========================================
+            // 🎨 STICKER PLUGIN
+            // ========================================
+            if (command === '!fig' || command === '!sticker' || command === '!s') {
                 await stickerPlugin(this.sock, message);
-// No comando !help, atualize o texto:
+                return;
+            }
 
-if (command === '!help') {
-    const text = `
-🤖 AJUDA - STICKER BOT
+            // ========================================
+            // ❓ HELP
+            // ========================================
+            if (command === '!help') {
+                const text = `
+🤖 STICKER BOT - AJUDA COMPLETA
 
 🎨 FIGURINHAS:
-• !fig / !sticker / !s - Criar figurinha
+• !fig / !s / !sticker - Criar figurinha
 • !toimg / !toimage - Converter figurinha para imagem
-•!bg / !removebg - criar sticker sem fundo
-•!scircle /!redondo - criar sticker redondo
+• !removebg / !bg - Remover fundo da imagem
+• !scircle / !redondo - Sticker redondo
 
 📦 PACOTES DE FIGURINHAS:
 • !pack [nome] - Receber figurinha do pacote
@@ -859,6 +981,7 @@ if (command === '!help') {
 • !sticker - Figurinha aleatória
 • !addsticker [nome] - (Admin) Salvar figurinha
 • !rmsticker [ID] - (Admin) Remover figurinha
+
 🎉 WELCOME:
 • !setwelcome - Configurar sticker de boas-vindas
 • !disablewelcome - Desativar welcome
@@ -869,12 +992,24 @@ if (command === '!help') {
 • !disableban - Desativar ban de gringos
 • !banstatus - Status do ban
 
-📌 EXEMPLOS:
-• Envie uma imagem com !fig
-• Responda uma figurinha com !toimg
-    `;
-    await this.sock.sendMessage(groupJid, { text }, { quoted: message });
-}
+🔗 ANTI-LINK:
+• !antilink on/off - Ativar/Desativar
+• !antilink action delete/warn/kick - Ação
+• !antilink status - Ver status
+
+📌 MENU:
+• !menu - Menu principal
+• !setmenu - (Admin) Definir imagem do menu
+• !delmenu - (Admin) Remover imagem do menu
+
+🏓 UTILIDADES:
+• !ping - Verificar latência do bot
+
+🔒 Limite: 3 figurinhas por vez (anti-spam)
+                `;
+                await this.sock.sendMessage(groupJid, { text }, { quoted: message });
+                return;
+            }
 
         } catch (error) {
             console.log('❌ Erro:', error.message);
