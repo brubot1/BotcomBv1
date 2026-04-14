@@ -437,7 +437,7 @@ if (isGroup) {
                 // Enviar aviso
                 await this.sock.sendMessage(groupJid, {
                     text: spamCheck.message
-                });
+                }, { quoted: message });
                 
                 // Não processa o comando
                 return;
