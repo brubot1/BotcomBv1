@@ -35,11 +35,7 @@ class StickerBot {
         console.log(`📞 Número: ${config.ownerNumber}\n`);
         this.init();
     }
-// Métodot auxiliar para pegar timeWindow (adicione na classe Stickebot
-async getTimeWindow(groupJid) {
-    const config = await AntiSpamHandler.loadConfig(groupJid);
-    return config.timeWindow / 1000;
-}
+
     async init() {
         if (this.isConnecting) {
             console.log('⚠️ Conexão já em andamento...');
@@ -55,7 +51,7 @@ async getTimeWindow(groupJid) {
             await MenuHandler.init();
             await StickerPackHandler.init();
             await AntiLinkHandler.init();
-            await AntiSpamHandler.init();
+            await antiSpamHandler.init();
             
             const { version } = await fetchLatestBaileysVersion();
             const { state, saveCreds } = await useMultiFileAuthState(config.sessionName);
@@ -379,7 +375,6 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
             const isGroup = message.key.remoteJid.includes('@g.us');
             const groupJid = message.key.remoteJid;
             const senderNumber = message.key.participant || message.key.remoteJid;
-            const senderId = message.key.participant || message.key.remoteJid;
 
             console.log(`📨 ${text?.substring(0, 40) || '(mídia)'}`);
 
@@ -387,13 +382,13 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
             // 🔗 ANTI-LINK - Verificar links (ANTES dos comandos)
             // ========================================
             if (isGroup && text && !command?.startsWith('!')) {
-                const isAdminUser = await AntiLinkHandler.isAdmin(this.sock, groupJid, senderId);
+                const isAdminUser = await AntiLinkHandler.isAdmin(this.sock, groupJid, senderNumber);
                 
                 if (!isAdminUser) {
-                    const check = await AntiLinkHandler.checkMessage(text, groupJid, senderId);
+                    const check = await AntiLinkHandler.checkMessage(text, groupJid, senderNumber);
                     
                     if (check.blocked) {
-                        console.log(`🚫 Link bloqueado: ${check.domain} de ${senderId}`);
+                        console.log(`🚫 Link bloqueado: ${check.domain} de ${senderNumber}`);
                         
                         await this.sock.sendMessage(groupJid, {
                             delete: message.key
@@ -405,7 +400,7 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                         });
                         
                         if (check.action === 'kick') {
-                            await AntiLinkHandler.kickUser(this.sock, groupJid, senderId);
+                            await AntiLinkHandler.kickUser(this.sock, groupJid, senderNumber);
                             await this.sock.sendMessage(groupJid, {
                                 text: `🔨 Usuário removido por enviar link proibido: ${check.domain}`
                             });
@@ -415,36 +410,6 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
                     }
                 }
             }
-
-            // ========================================
-            // 🛡️ ANTI-SPAM
-            // ========================================
-            // ========================================
-// 🛡️ ANTI-SPAM (Só para COMANDOS)
-// ========================================
-if (isGroup) {
-    const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
-    const isOwner = senderNumber.includes(config.ownerNumber.replace(/\D/g, ''));
-    
-    // SÓ verifica se for um COMANDO (começa com !)
-    if (!isAdminUser && !isOwner && text?.startsWith('!')) {
-        const config = await AntiSpamHandler.loadConfig(groupJid);
-        
-        if (config.enabled) {
-            const spamCheck = await AntiSpamHandler.checkCommand(groupJid, senderId, config);
-            
-            if (spamCheck.blocked) {
-                // Enviar aviso
-                await this.sock.sendMessage(groupJid, {
-                    text: spamCheck.message
-                });
-                
-                // Não processa o comando
-                return;
-            }
-        }
-    }
-}
 
             // ========================================
             // 📌 COMANDOS DO ANTI-LINK
@@ -457,7 +422,7 @@ if (isGroup) {
                     return;
                 }
                 
-                const isAdminUser = await AntiLinkHandler.isAdmin(this.sock, groupJid, senderId);
+                const isAdminUser = await AntiLinkHandler.isAdmin(this.sock, groupJid, senderNumber);
                 if (!isAdminUser) {
                     await this.sock.sendMessage(groupJid, {
                         text: '❌ Apenas administradores podem configurar o anti-link'
@@ -521,148 +486,6 @@ if (isGroup) {
                           `• !antilink off - Desativar\n` +
                           `• !antilink action delete/warn/kick - Ação\n` +
                           `• !antilink status - Ver status`
-                }, { quoted: message });
-                return;
-            }
-
-            // ========================================
-            // 📌 COMANDOS DO ANTI-SPAM
-            // ========================================
-            // ========================================
-// 📌 COMANDOS DO ANTI-SPAM
-// ========================================
-if (command === '!antispam') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
-    if (!isAdminUser) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Apenas administradores podem configurar o anti-spam'
-        }, { quoted: message });
-        return;
-    }
-    
-    const args = text.split(' ');
-    const subCommand = args[1];
-    
-    if (subCommand === 'on') {
-        await AntiSpamHandler.setEnabled(groupJid, true);
-        await this.sock.sendMessage(groupJid, {
-            text: '✅ Anti-spam ATIVADO!\n\nLimite: 4 comandos em 5 segundos\nMensagens normais: liberadas'
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'off') {
-        await AntiSpamHandler.setEnabled(groupJid, false);
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Anti-spam DESATIVADO!'
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'limit') {
-        const limit = parseInt(args[2]);
-        if (!limit || limit < 1) {
-            await this.sock.sendMessage(groupJid, {
-                text: '❌ Use: !antispam limit [número]\n📌 Exemplo: !antispam limit 6'
-            }, { quoted: message });
-            return;
-        }
-        await AntiSpamHandler.setCommandLimit(groupJid, limit);
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Limite alterado para ${limit} comandos em ${await this.getTimeWindow(groupJid)} segundos`
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'time') {
-        const seconds = parseInt(args[2]);
-        if (!seconds || seconds < 1) {
-            await this.sock.sendMessage(groupJid, {
-                text: '❌ Use: !antispam time [segundos]\n📌 Exemplo: !antispam time 10'
-            }, { quoted: message });
-            return;
-        }
-        await AntiSpamHandler.setBlockTime(groupJid, seconds);
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Tempo de bloqueio alterado para ${seconds} segundos`
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'clear') {
-        const mentionedUser = message.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-        if (!mentionedUser) {
-            await this.sock.sendMessage(groupJid, {
-                text: '❌ Marque o usuário: !antispam clear @usuario'
-            }, { quoted: message });
-            return;
-        }
-        await AntiSpamHandler.clearUserCommands(groupJid, mentionedUser);
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Registro de comandos limpo para o usuário!`
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'status') {
-        const status = await AntiSpamHandler.getStatus(groupJid);
-        await this.sock.sendMessage(groupJid, {
-            text: status
-        }, { quoted: message });
-        return;
-    }
-    
-    // Ajuda
-    await this.sock.sendMessage(groupJid, {
-        text: `🛡️ *COMANDOS ANTI-SPAM (Só para comandos)*\n\n` +
-              `• !antispam on - Ativar\n` +
-              `• !antispam off - Desativar\n` +
-              `• !antispam limit [n] - Mudar limite (padrão: 4)\n` +
-              `• !antispam time [s] - Mudar tempo bloqueio (padrão: 5s)\n` +
-              `• !antispam clear @user - Limpar registro\n` +
-              `• !antispam status - Ver status\n\n` +
-              `💬 Mensagens normais NÃO são bloqueadas!`
-    }, { quoted: message });
-    return;
-}
-
-            // ========================================
-            // 🔓 COMANDO !unmute
-            // ========================================
-            if (command === '!unmute') {
-                if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
-                    return;
-                }
-                
-                const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
-                if (!isAdminUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas administradores podem desmutar usuários'
-                    }, { quoted: message });
-                    return;
-                }
-                
-                const mentionedUser = message.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-                if (!mentionedUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Marque o usuário: !unmute @usuario'
-                    }, { quoted: message });
-                    return;
-                }
-                
-                await AntiSpamHandler.unmuteUser(groupJid, mentionedUser);
-                await this.sock.sendMessage(groupJid, {
-                    text: `✅ Usuário desmutado!`
                 }, { quoted: message });
                 return;
             }
@@ -881,9 +704,9 @@ if (command === '!antispam') {
                     return;
                 }
                 
-                const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, senderId);
+                const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
                 
-                if (!isAdminUser) {
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
                     await this.sock.sendMessage(groupJid, {
                         text: '❌ Apenas administradores do grupo podem adicionar figurinhas'
                     }, { quoted: message });
@@ -1007,9 +830,9 @@ if (command === '!antispam') {
                     return;
                 }
                 
-                const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, senderId);
+                const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
                 
-                if (!isAdminUser) {
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
                     await this.sock.sendMessage(groupJid, {
                         text: '❌ Apenas administradores do grupo podem remover figurinhas'
                     }, { quoted: message });
@@ -1051,9 +874,9 @@ if (command === '!antispam') {
                     return;
                 }
                 
-                const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, senderId);
+                const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
                 
-                if (!isAdminUser) {
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
                     await this.sock.sendMessage(groupJid, {
                         text: '❌ Apenas administradores podem definir a imagem do menu'
                     }, { quoted: message });
@@ -1091,9 +914,9 @@ if (command === '!antispam') {
                     return;
                 }
                 
-                const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, senderId);
+                const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, message.key.participant || message.key.remoteJid);
                 
-                if (!isAdminUser) {
+                if (!isAdminUser && message.key.participant !== config.ownerNumber) {
                     await this.sock.sendMessage(groupJid, {
                         text: '❌ Apenas administradores podem remover a imagem do menu'
                     }, { quoted: message });
@@ -1143,8 +966,8 @@ if (command === '!antispam') {
             // ========================================
             // ❓ HELP
             // ========================================
-if (command === '!help') {
-    const text = `
+            if (command === '!help') {
+                const text = `
 🤖 STICKER BOT - AJUDA COMPLETA
 
 🎨 FIGURINHAS:
@@ -1154,45 +977,42 @@ if (command === '!help') {
 • !scircle / !redondo - Sticker redondo
 
 📦 PACOTES DE FIGURINHAS:
-• !pack [nome] - Receber figurinha
-• !packs - Listar pacotes
-• !addsticker [nome] - (Admin) Salvar
-• !rmsticker [ID] - (Admin) Remover
+• !pack [nome] - Receber figurinha do pacote
+• !pack [nome] 3 - Receber 3 figurinhas
+• !packs - Listar pacotes disponíveis
+• !sticker - Figurinha aleatória
+• !addsticker [nome] - (Admin) Salvar figurinha
+• !rmsticker [ID] - (Admin) Remover figurinha
 
 🎉 WELCOME:
 • !setwelcome - Configurar sticker de boas-vindas
-• !disablewelcome - Desativar
-• !welcomestatus - Status
+• !disablewelcome - Desativar welcome
+• !welcomestatus - Status do welcome
 
 🔨 BAN:
 • !enableban - Ativar ban de gringos
-• !disableban - Desativar
-• !banstatus - Status
+• !disableban - Desativar ban de gringos
+• !banstatus - Status do ban
 
 🔗 ANTI-LINK:
 • !antilink on/off - Ativar/Desativar
 • !antilink action delete/warn/kick - Ação
 • !antilink status - Ver status
 
-🛡️ ANTI-SPAM (Só comandos):
-• !antispam on/off - Ativar/Desativar
-• !antispam limit [n] - Mudar limite (padrão: 4)
-• !antispam time [s] - Mudar tempo bloqueio (padrão: 5s)
-• !antispam clear @user - Limpar registro
-• !antispam status - Ver status
-
 📌 MENU:
 • !menu - Menu principal
 • !setmenu - (Admin) Definir imagem do menu
+• !delmenu - (Admin) Remover imagem do menu
 
 🏓 UTILIDADES:
-• !ping - Verificar latência
+• !ping - Verificar latência do bot
 
-💬 Mensagens normais NUNCA são bloqueadas!
-    `;
-    await this.sock.sendMessage(groupJid, { text }, { quoted: message });
-    return;
-}
+🔒 Limite: 3 figurinhas por vez (anti-spam)
+                `;
+                await this.sock.sendMessage(groupJid, { text }, { quoted: message });
+                return;
+            }
+
         } catch (error) {
             console.log('❌ Erro:', error.message);
         }
