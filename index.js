@@ -12,6 +12,9 @@ import { CircleHandler } from './src/handlers/circleHandler.js';
 import { StickerPackHandler } from './src/handlers/stickerPackHandler.js';
 import { AntiLinkHandler } from './src/handlers/antiLinkHandler.js';
 import { AntiSpamHandler } from './src/handlers/antiSpamHandler.js';
+import { handleNewMember, addPoints, showRank, showTopInvites, resetUserInvites, loadGroupData, saveGroupData } from './plugins/inviteRank.js';
+import { CommandLimitsHandler } from './src/handlers/commandLimitsHandler.js';
+import { menuDono } from './plugins/menuDono.js';
 
 const startTime = Date.now();
 
@@ -35,11 +38,12 @@ class StickerBot {
         console.log(`📞 Número: ${config.ownerNumber}\n`);
         this.init();
     }
-// Métodot auxiliar para pegar timeWindow (adicione na classe Stickebot
-async getTimeWindow(groupJid) {
-    const config = await AntiSpamHandler.loadConfig(groupJid);
-    return config.timeWindow / 1000;
-}
+
+    async getTimeWindow(groupJid) {
+        const config = await AntiSpamHandler.loadConfig(groupJid);
+        return config.timeWindow / 1000;
+    }
+
     async init() {
         if (this.isConnecting) {
             console.log('⚠️ Conexão já em andamento...');
@@ -56,6 +60,7 @@ async getTimeWindow(groupJid) {
             await StickerPackHandler.init();
             await AntiLinkHandler.init();
             await AntiSpamHandler.init();
+            await CommandLimitsHandler.init();
             
             const { version } = await fetchLatestBaileysVersion();
             const { state, saveCreds } = await useMultiFileAuthState(config.sessionName);
@@ -105,9 +110,9 @@ async getTimeWindow(groupJid) {
         this.sock.ev.on('messages.upsert', this.handleMessages.bind(this));
 
         this.sock.ev.on('group-participants.update', (update) => {
-            const { id, participants, action } = update;
+            const { id, participants, action, author } = update;
             GroupHandler.handleGroupParticipantsUpdate(
-                { participants, action },
+                { participants, action, author },
                 this.sock,
                 id
             );
@@ -383,8 +388,18 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
 
             console.log(`📨 ${text?.substring(0, 40) || '(mídia)'}`);
 
+            // DETECTAR QUEM ADICIONOU NOVO MEMBRO
+            if (message.message?.groupParticipantAdded) {
+                const addedUsers = message.message.groupParticipantAdded;
+                const adderId = message.key.participant || message.key.remoteJid;
+                
+                for (const newUser of addedUsers) {
+                    await handleNewMember(this.sock, groupJid, newUser, adderId);
+                }
+            }
+
             // ========================================
-            // 🔗 ANTI-LINK - Verificar links (ANTES dos comandos)
+            // 🔗 ANTI-LINK
             // ========================================
             if (isGroup && text && !command?.startsWith('!')) {
                 const isAdminUser = await AntiLinkHandler.isAdmin(this.sock, groupJid, senderId);
@@ -417,35 +432,73 @@ Opção 2: CÓDIGO ALFANUMÉRICO (Mais rápido)
             }
 
             // ========================================
-            // 🛡️ ANTI-SPAM
+            // 🛡️ ANTI-SPAM (Só para COMANDOS)
             // ========================================
-            // ========================================
-// 🛡️ ANTI-SPAM (Só para COMANDOS)
+            if (isGroup) {
+                const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
+                const isOwner = senderNumber.includes(config.ownerNumber.replace(/\D/g, ''));
+                
+                if (!isAdminUser && !isOwner && text?.startsWith('!')) {
+                    const configSpam = await AntiSpamHandler.loadConfig(groupJid);
+                    
+                    if (configSpam.enabled) {
+                        const spamCheck = await AntiSpamHandler.checkCommand(groupJid, senderId, configSpam);
+                        
+                        if (spamCheck.blocked) {
+                            await this.sock.sendMessage(groupJid, {
+                                text: spamCheck.message
+                            }, { quoted: message });
+                            return;
+                        }
+                    }
+                }
+            }
 // ========================================
-if (isGroup) {
+// 💰 VERIFICAR LIMITE DE COMANDOS
+// ========================================
+if (isGroup && text?.startsWith('!') && !command?.startsWith('!menudono')) {
     const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
     const isOwner = senderNumber.includes(config.ownerNumber.replace(/\D/g, ''));
     
-    // SÓ verifica se for um COMANDO (começa com !)
-    if (!isAdminUser && !isOwner && text?.startsWith('!')) {
-        const config = await AntiSpamHandler.loadConfig(groupJid);
+    // Admins e dono não têm limite
+    if (!isAdminUser && !isOwner) {
+        // Carregar pontos do usuário do sistema de convites
+        const inviteData = await loadGroupData(groupJid);
+        const userPoints = inviteData.users[senderId]?.points || 0;
         
-        if (config.enabled) {
-            const spamCheck = await AntiSpamHandler.checkCommand(groupJid, senderId, config);
-            
-            if (spamCheck.blocked) {
-                // Enviar aviso
-                await this.sock.sendMessage(groupJid, {
-                    text: spamCheck.message
-                }, { quoted: message });
-                
-                // Não processa o comando
-                return;
-            }
+        const limitCheck = await CommandLimitsHandler.checkLimit(groupJid, senderId, command, userPoints);
+        
+        if (!limitCheck.allowed) {
+            await this.sock.sendMessage(groupJid, {
+                text: `❌ *LIMITE EXCEDIDO!*\n\nVocê já usou todos os *${limitCheck.freeLimit}* usos grátis de *${command}* hoje.\n\n💰 Próximo uso custa *${limitCheck.pointsNeeded}* pontos.\n📊 Seus pontos: *${limitCheck.userPoints}*\n\n🎯 Convide amigos para ganhar pontos!`
+            }, { quoted: message });
+            return;
         }
+        
+        // Se for pago, debitar pontos
+        if (limitCheck.reason === 'paid') {
+            const inviteData = await loadGroupData(groupJid);
+            if (!inviteData.users[senderId]) {
+                inviteData.users[senderId] = { points: 0, invites: [], totalInvites: 0 };
+            }
+            inviteData.users[senderId].points -= limitCheck.pointsNeeded;
+            await saveGroupData(groupJid, inviteData);
+            
+            await this.sock.sendMessage(groupJid, {
+                text: `💰 *COMANDO PAGO!*\n\nVocê usou *${limitCheck.pointsNeeded}* pontos para executar *${command}*.\n📊 Pontos restantes: *${inviteData.users[senderId].points}*`
+            }, { quoted: message });
+        }
+        
+        // Registrar uso
+        await CommandLimitsHandler.addUsage(groupJid, senderId, command);
     }
 }
-
+// !menudono
+if (command === '!menudono') {
+    const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
+    await menuDono(this.sock, message, groupJid, senderId, text, isAdminUser);
+    return;
+}
             // ========================================
             // 📌 COMANDOS DO ANTI-LINK
             // ========================================
@@ -470,57 +523,41 @@ if (isGroup) {
                 
                 if (subCommand === 'on') {
                     await AntiLinkHandler.setEnabled(groupJid, true);
-                    await this.sock.sendMessage(groupJid, {
-                        text: '✅ Anti-link ATIVADO!'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '✅ Anti-link ATIVADO!' }, { quoted: message });
                     return;
                 }
                 
                 if (subCommand === 'off') {
                     await AntiLinkHandler.setEnabled(groupJid, false);
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Anti-link DESATIVADO!'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Anti-link DESATIVADO!' }, { quoted: message });
                     return;
                 }
                 
                 if (subCommand === 'action') {
                     const action = args[2];
                     if (!action) {
-                        await this.sock.sendMessage(groupJid, {
-                            text: '❌ Use: !antilink action delete/warn/kick'
-                        }, { quoted: message });
+                        await this.sock.sendMessage(groupJid, { text: '❌ Use: !antilink action delete/warn/kick' }, { quoted: message });
                         return;
                     }
                     
                     const result = await AntiLinkHandler.setAction(groupJid, action);
                     if (result.success) {
                         const actionText = action === 'delete' ? 'deletar mensagem' : action === 'warn' ? 'avisar' : 'remover usuário';
-                        await this.sock.sendMessage(groupJid, {
-                            text: `✅ Ação alterada para: ${actionText}`
-                        }, { quoted: message });
+                        await this.sock.sendMessage(groupJid, { text: `✅ Ação alterada para: ${actionText}` }, { quoted: message });
                     } else {
-                        await this.sock.sendMessage(groupJid, {
-                            text: result.error
-                        }, { quoted: message });
+                        await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                     }
                     return;
                 }
                 
                 if (subCommand === 'status') {
                     const status = await AntiLinkHandler.getStatus(groupJid);
-                    await this.sock.sendMessage(groupJid, {
-                        text: status
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: status }, { quoted: message });
                     return;
                 }
                 
                 await this.sock.sendMessage(groupJid, {
-                    text: `🔗 *COMANDOS ANTI-LINK*\n\n` +
-                          `• !antilink on - Ativar\n` +
-                          `• !antilink off - Desativar\n` +
-                          `• !antilink action delete/warn/kick - Ação\n` +
-                          `• !antilink status - Ver status`
+                    text: `🔗 *COMANDOS ANTI-LINK*\n\n• !antilink on - Ativar\n• !antilink off - Desativar\n• !antilink action delete/warn/kick - Ação\n• !antilink status - Ver status`
                 }, { quoted: message });
                 return;
             }
@@ -528,142 +565,101 @@ if (isGroup) {
             // ========================================
             // 📌 COMANDOS DO ANTI-SPAM
             // ========================================
-            // ========================================
-// 📌 COMANDOS DO ANTI-SPAM
-// ========================================
-if (command === '!antispam') {
-    if (!isGroup) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Este comando só funciona em grupos'
-        }, { quoted: message });
-        return;
-    }
-    
-    const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
-    if (!isAdminUser) {
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Apenas administradores podem configurar o anti-spam'
-        }, { quoted: message });
-        return;
-    }
-    
-    const args = text.split(' ');
-    const subCommand = args[1];
-    
-    if (subCommand === 'on') {
-        await AntiSpamHandler.setEnabled(groupJid, true);
-        await this.sock.sendMessage(groupJid, {
-            text: '✅ Anti-spam ATIVADO!\n\nLimite: 4 comandos em 5 segundos\nMensagens normais: liberadas'
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'off') {
-        await AntiSpamHandler.setEnabled(groupJid, false);
-        await this.sock.sendMessage(groupJid, {
-            text: '❌ Anti-spam DESATIVADO!'
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'limit') {
-        const limit = parseInt(args[2]);
-        if (!limit || limit < 1) {
-            await this.sock.sendMessage(groupJid, {
-                text: '❌ Use: !antispam limit [número]\n📌 Exemplo: !antispam limit 6'
-            }, { quoted: message });
-            return;
-        }
-        await AntiSpamHandler.setCommandLimit(groupJid, limit);
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Limite alterado para ${limit} comandos em ${await this.getTimeWindow(groupJid)} segundos`
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'time') {
-        const seconds = parseInt(args[2]);
-        if (!seconds || seconds < 1) {
-            await this.sock.sendMessage(groupJid, {
-                text: '❌ Use: !antispam time [segundos]\n📌 Exemplo: !antispam time 10'
-            }, { quoted: message });
-            return;
-        }
-        await AntiSpamHandler.setBlockTime(groupJid, seconds);
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Tempo de bloqueio alterado para ${seconds} segundos`
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'clear') {
-        const mentionedUser = message.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-        if (!mentionedUser) {
-            await this.sock.sendMessage(groupJid, {
-                text: '❌ Marque o usuário: !antispam clear @usuario'
-            }, { quoted: message });
-            return;
-        }
-        await AntiSpamHandler.clearUserCommands(groupJid, mentionedUser);
-        await this.sock.sendMessage(groupJid, {
-            text: `✅ Registro de comandos limpo para o usuário!`
-        }, { quoted: message });
-        return;
-    }
-    
-    if (subCommand === 'status') {
-        const status = await AntiSpamHandler.getStatus(groupJid);
-        await this.sock.sendMessage(groupJid, {
-            text: status
-        }, { quoted: message });
-        return;
-    }
-    
-    // Ajuda
-    await this.sock.sendMessage(groupJid, {
-        text: `🛡️ *COMANDOS ANTI-SPAM (Só para comandos)*\n\n` +
-              `• !antispam on - Ativar\n` +
-              `• !antispam off - Desativar\n` +
-              `• !antispam limit [n] - Mudar limite (padrão: 4)\n` +
-              `• !antispam time [s] - Mudar tempo bloqueio (padrão: 5s)\n` +
-              `• !antispam clear @user - Limpar registro\n` +
-              `• !antispam status - Ver status\n\n` +
-              `💬 Mensagens normais NÃO são bloqueadas!`
-    }, { quoted: message });
-    return;
-}
+            if (command === '!antispam') {
+                if (!isGroup) {
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
+                    return;
+                }
+                
+                const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
+                if (!isAdminUser) {
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas administradores podem configurar o anti-spam' }, { quoted: message });
+                    return;
+                }
+                
+                const args = text.split(' ');
+                const subCommand = args[1];
+                
+                if (subCommand === 'on') {
+                    await AntiSpamHandler.setEnabled(groupJid, true);
+                    await this.sock.sendMessage(groupJid, { text: '✅ Anti-spam ATIVADO!\n\nLimite: 4 comandos em 5 segundos\nMensagens normais: liberadas' }, { quoted: message });
+                    return;
+                }
+                
+                if (subCommand === 'off') {
+                    await AntiSpamHandler.setEnabled(groupJid, false);
+                    await this.sock.sendMessage(groupJid, { text: '❌ Anti-spam DESATIVADO!' }, { quoted: message });
+                    return;
+                }
+                
+                if (subCommand === 'limit') {
+                    const limit = parseInt(args[2]);
+                    if (!limit || limit < 1) {
+                        await this.sock.sendMessage(groupJid, { text: '❌ Use: !antispam limit [número]' }, { quoted: message });
+                        return;
+                    }
+                    await AntiSpamHandler.setCommandLimit(groupJid, limit);
+                    await this.sock.sendMessage(groupJid, { text: `✅ Limite alterado para ${limit} comandos` }, { quoted: message });
+                    return;
+                }
+                
+                if (subCommand === 'time') {
+                    const seconds = parseInt(args[2]);
+                    if (!seconds || seconds < 1) {
+                        await this.sock.sendMessage(groupJid, { text: '❌ Use: !antispam time [segundos]' }, { quoted: message });
+                        return;
+                    }
+                    await AntiSpamHandler.setBlockTime(groupJid, seconds);
+                    await this.sock.sendMessage(groupJid, { text: `✅ Tempo de bloqueio alterado para ${seconds} segundos` }, { quoted: message });
+                    return;
+                }
+                
+                if (subCommand === 'clear') {
+                    const mentionedUser = message.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                    if (!mentionedUser) {
+                        await this.sock.sendMessage(groupJid, { text: '❌ Marque o usuário: !antispam clear @usuario' }, { quoted: message });
+                        return;
+                    }
+                    await AntiSpamHandler.clearUserCommands(groupJid, mentionedUser);
+                    await this.sock.sendMessage(groupJid, { text: `✅ Registro limpo!` }, { quoted: message });
+                    return;
+                }
+                
+                if (subCommand === 'status') {
+                    const status = await AntiSpamHandler.getStatus(groupJid);
+                    await this.sock.sendMessage(groupJid, { text: status }, { quoted: message });
+                    return;
+                }
+                
+                await this.sock.sendMessage(groupJid, {
+                    text: `🛡️ *COMANDOS ANTI-SPAM*\n\n• !antispam on/off\n• !antispam limit [n]\n• !antispam time [s]\n• !antispam clear @user\n• !antispam status`
+                }, { quoted: message });
+                return;
+            }
 
             // ========================================
             // 🔓 COMANDO !unmute
             // ========================================
             if (command === '!unmute') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
                 const isAdminUser = await AntiSpamHandler.isAdmin(this.sock, groupJid, senderId);
                 if (!isAdminUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas administradores podem desmutar usuários'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas administradores!' }, { quoted: message });
                     return;
                 }
                 
                 const mentionedUser = message.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
                 if (!mentionedUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Marque o usuário: !unmute @usuario'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Marque o usuário: !unmute @usuario' }, { quoted: message });
                     return;
                 }
                 
                 await AntiSpamHandler.unmuteUser(groupJid, mentionedUser);
-                await this.sock.sendMessage(groupJid, {
-                    text: `✅ Usuário desmutado!`
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: `✅ Usuário desmutado!` }, { quoted: message });
                 return;
             }
 
@@ -672,13 +668,9 @@ if (command === '!antispam') {
             // ========================================
             if (command === '!ping') {
                 const start = Date.now();
-                await this.sock.sendMessage(groupJid, {
-                    text: '🏓 Pong!'
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: '🏓 Pong!' }, { quoted: message });
                 const end = Date.now();
-                await this.sock.sendMessage(groupJid, {
-                    text: `⏱️ Latência: ${end - start}ms`
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: `⏱️ Latência: ${end - start}ms` }, { quoted: message });
                 return;
             }
 
@@ -687,90 +679,52 @@ if (command === '!antispam') {
             // ========================================
             if (command === '!onwelcome' || command === '!setbemvindo') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas em grupos' }, { quoted: message });
                     return;
                 }
 
                 let stickerBuffer = null;
-
                 const quotedMessage = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-                if (quotedMessage?.stickerMessage) {
-                    stickerBuffer = quotedMessage.stickerMessage;
-                }
-                
-                if (!stickerBuffer && message.message?.stickerMessage) {
-                    stickerBuffer = message.message.stickerMessage;
-                }
+                if (quotedMessage?.stickerMessage) stickerBuffer = quotedMessage.stickerMessage;
+                if (!stickerBuffer && message.message?.stickerMessage) stickerBuffer = message.message.stickerMessage;
 
                 if (!stickerBuffer) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: `📝 Responda a uma FIGURINHA e digite: !setwelcome`
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: `📝 Responda a uma FIGURINHA e digite: !setwelcome` }, { quoted: message });
                     return;
                 }
 
                 try {
                     const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
-                    
                     const stream = await downloadContentFromMessage(stickerBuffer, 'sticker');
                     let buffer = Buffer.from([]);
-                    
-                    for await (const chunk of stream) {
-                        buffer = Buffer.concat([buffer, chunk]);
-                    }
+                    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
                     
                     const success = await WelcomeHandler.saveWelcomeSticker(groupJid, buffer, 'sticker');
-                    
-                    if (success) {
-                        await this.sock.sendMessage(groupJid, {
-                            text: '✅ Figurinha salva!\n\n🎉 Welcome ativado'
-                        }, { quoted: message });
-                    } else {
-                        await this.sock.sendMessage(groupJid, {
-                            text: '❌ Erro ao salvar figurinha'
-                        }, { quoted: message });
-                    }
-                    
+                    await this.sock.sendMessage(groupJid, { text: success ? '✅ Figurinha salva!\n\n🎉 Welcome ativado' : '❌ Erro ao salvar figurinha' }, { quoted: message });
                 } catch (error) {
                     console.error('❌ Erro:', error);
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Erro ao processar figurinha'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Erro ao processar figurinha' }, { quoted: message });
                 }
                 return;
             }
 
             if (command === '!ofwelcome' || command === '!desativarwelcome') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas em grupos' }, { quoted: message });
                     return;
                 }
-
                 await WelcomeHandler.disableWelcome(groupJid);
-                
-                await this.sock.sendMessage(groupJid, {
-                    text: '✅ Welcome desativado'
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: '✅ Welcome desativado' }, { quoted: message });
                 return;
             }
 
             if (command === '!welcomestatus' || command === '!statuswelcome') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas em grupos' }, { quoted: message });
                     return;
                 }
-
                 const status = WelcomeHandler.getWelcomeStatus(groupJid);
-                
-                await this.sock.sendMessage(groupJid, {
-                    text: status
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: status }, { quoted: message });
                 return;
             }
 
@@ -779,49 +733,31 @@ if (command === '!antispam') {
             // ========================================
             if (command === '!enableban' || command === '!onban') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas em grupos' }, { quoted: message });
                     return;
                 }
-
                 GroupHandler.enableBan(groupJid);
-                
-                await this.sock.sendMessage(groupJid, {
-                    text: '🔨 Ban ATIVADO\n\n❌ Gringos serão banidos'
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: '🔨 Ban ATIVADO\n\n❌ Gringos serão banidos' }, { quoted: message });
                 return;
             }
 
             if (command === '!disableban' || command === '!ofban') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas em grupos' }, { quoted: message });
                     return;
                 }
-
                 GroupHandler.disableBan(groupJid);
-                
-                await this.sock.sendMessage(groupJid, {
-                    text: '🔓 Ban DESATIVADO\n\n✅ Todos podem entrar'
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: '🔓 Ban DESATIVADO\n\n✅ Todos podem entrar' }, { quoted: message });
                 return;
             }
 
             if (command === '!banstatus' || command === '!statusban') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas em grupos' }, { quoted: message });
                     return;
                 }
-
                 const status = GroupHandler.getBanStatus(groupJid);
-                
-                await this.sock.sendMessage(groupJid, {
-                    text: status
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: status }, { quoted: message });
                 return;
             }
 
@@ -831,11 +767,8 @@ if (command === '!antispam') {
             if (command === '!toimg' || command === '!toimage' || command === '!figimg') {
                 const { ToImageHandler } = await import('./src/handlers/toImageHandler.js');
                 const result = await ToImageHandler.convertStickerToImage(message, this.sock);
-                
                 if (!result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: result.error
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                 }
                 return;
             }
@@ -843,29 +776,20 @@ if (command === '!antispam') {
             if (command === '!removebg' || command === '!bg') {
                 const { RemoveBgHandler } = await import('./src/handlers/removeBgHandler.js');
                 const result = await RemoveBgHandler.removeBackground(message, this.sock);
-                
                 if (!result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: result.error
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                 }
                 return;
             }
 
             if (command === '!scircle' || command === '!circle' || command === '!redondo') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
-                
                 const result = await CircleHandler.createCircleSticker(message, this.sock);
-                
                 if (!result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: result.error
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                 }
                 return;
             }
@@ -875,59 +799,41 @@ if (command === '!antispam') {
             // ========================================
             if (command === '!addsticker' || command === '!addfig') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
                 const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, senderId);
-                
                 if (!isAdminUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas administradores do grupo podem adicionar figurinhas'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas administradores!' }, { quoted: message });
                     return;
                 }
                 
                 const args = text.split(' ');
                 const packName = args[1];
-                
                 if (!packName) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Use: !addsticker [nome do pacote]\n\n📌 Exemplo: !addsticker reacoes'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Use: !addsticker [nome do pacote]' }, { quoted: message });
                     return;
                 }
                 
                 const stickerBuffer = await StickerPackHandler.downloadSticker(message);
-                
                 if (!stickerBuffer) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Responda a uma FIGURINHA com o comando !addsticker'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Responda a uma FIGURINHA com o comando !addsticker' }, { quoted: message });
                     return;
                 }
                 
                 const result = await StickerPackHandler.saveSticker(packName, stickerBuffer, message, this.sock);
-                
                 if (result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: `✅ Figurinha salva!\n\n📦 Pacote: ${result.packName}\n🆔 ID: ${result.fileName}\n📊 Total: ${result.total} figurinhas`
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: `✅ Figurinha salva!\n\n📦 Pacote: ${result.packName}\n🆔 ID: ${result.fileName}\n📊 Total: ${result.total} figurinhas` }, { quoted: message });
                 } else {
-                    await this.sock.sendMessage(groupJid, {
-                        text: result.error
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                 }
                 return;
             }
 
             if (command === '!pack') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
@@ -936,107 +842,102 @@ if (command === '!antispam') {
                 let quantity = parseInt(args[2]) || 1;
                 
                 if (!packName) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Use: !pack [nome do pacote] [quantidade]\n\n📌 Exemplo: !pack reacoes\n📌 Exemplo: !pack reacoes 3'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Use: !pack [nome do pacote] [quantidade]' }, { quoted: message });
                     return;
                 }
                 
                 const result = await StickerPackHandler.sendStickers(this.sock, groupJid, packName, quantity, message);
-                
                 if (!result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: result.error
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                 }
                 return;
             }
 
             if (command === '!packs' || command === '!listpack') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
                 const packs = await StickerPackHandler.listPacks();
-                
                 if (packs.length === 0) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '📦 Nenhum pacote disponível ainda.\n\nAdicione figurinhas com: !addsticker [nome]'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '📦 Nenhum pacote disponível ainda.\n\nAdicione figurinhas com: !addsticker [nome]' }, { quoted: message });
                     return;
                 }
                 
                 let packList = '📦 *PACOTES DISPONÍVEIS*\n\n';
-                for (const pack of packs) {
-                    packList += `• *${pack.name}* - ${pack.count} figurinhas\n`;
-                }
-                packList += '\n📌 Use: !pack [nome] para receber\n📌 Use: !pack [nome] 3 para várias';
-                
-                await this.sock.sendMessage(groupJid, {
-                    text: packList
-                }, { quoted: message });
+                for (const pack of packs) packList += `• *${pack.name}* - ${pack.count} figurinhas\n`;
+                packList += '\n📌 Use: !pack [nome] para receber';
+                await this.sock.sendMessage(groupJid, { text: packList }, { quoted: message });
                 return;
             }
 
             if (command === '!sticker' && text === '!sticker') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
-                
                 const result = await StickerPackHandler.sendRandomSticker(this.sock, groupJid, message);
-                
                 if (!result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: result.error
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                 }
                 return;
             }
 
             if (command === '!rmsticker' || command === '!removefig') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
                 const isAdminUser = await StickerPackHandler.isAdmin(this.sock, groupJid, senderId);
-                
                 if (!isAdminUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas administradores do grupo podem remover figurinhas'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas administradores!' }, { quoted: message });
                     return;
                 }
                 
                 const args = text.split(' ');
                 const stickerId = args[1];
-                
                 if (!stickerId) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Use: !rmsticker [ID]\n\n📌 Exemplo: !rmsticker reacoes_001'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Use: !rmsticker [ID]' }, { quoted: message });
                     return;
                 }
                 
                 const result = await StickerPackHandler.removeSticker(stickerId, message, this.sock);
-                
                 if (result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: `✅ Figurinha ${result.stickerId} removida do pacote "${result.packName}"`
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: `✅ Figurinha ${result.stickerId} removida!` }, { quoted: message });
                 } else {
-                    await this.sock.sendMessage(groupJid, {
-                        text: result.error
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: result.error }, { quoted: message });
                 }
+                return;
+            }
+
+            // ========================================
+            // 💎 COMANDOS DE PONTOS
+            // ========================================
+            
+            // !addpoints
+            if (command === '!addpoints') {
+                await addPoints(this.sock, message, groupJid, senderId, text);
+                return;
+            }
+
+            // !rank
+            if (command === '!rank') {
+                await showRank(this.sock, message, groupJid, senderId);
+                return;
+            }
+
+            // !top
+            if (command === '!top' || command === '!topconvites') {
+                await showTopInvites(this.sock, message, groupJid);
+                return;
+            }
+
+            // !resetconvites
+            if (command === '!resetconvites') {
+                const mentionedUser = message.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+                await resetUserInvites(this.sock, message, groupJid, senderId, mentionedUser);
                 return;
             }
 
@@ -1045,74 +946,47 @@ if (command === '!antispam') {
             // ========================================
             if (command === '!setmenu') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
                 const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, senderId);
-                
                 if (!isAdminUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas administradores podem definir a imagem do menu'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas administradores!' }, { quoted: message });
                     return;
                 }
                 
                 const imageBuffer = await MenuHandler.downloadImage(message);
-                
                 if (!imageBuffer) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Responda a uma IMAGEM com !setmenu'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Responda a uma IMAGEM com !setmenu' }, { quoted: message });
                     return;
                 }
                 
                 const result = await MenuHandler.saveMenuImage(groupJid, imageBuffer);
-                
-                if (result.success) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '✅ Imagem do menu salva!\n\nUse !menu para ver o novo menu'
-                    }, { quoted: message });
-                } else {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Erro ao salvar imagem'
-                    }, { quoted: message });
-                }
+                await this.sock.sendMessage(groupJid, { text: result.success ? '✅ Imagem do menu salva!\n\nUse !menu para ver' : '❌ Erro ao salvar imagem' }, { quoted: message });
                 return;
             }
 
             if (command === '!delmenu') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
                 const isAdminUser = await MenuHandler.isAdmin(this.sock, groupJid, senderId);
-                
                 if (!isAdminUser) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Apenas administradores podem remover a imagem do menu'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Apenas administradores!' }, { quoted: message });
                     return;
                 }
                 
                 await MenuHandler.deleteMenuImage(groupJid);
-                
-                await this.sock.sendMessage(groupJid, {
-                    text: '✅ Imagem do menu removida! O menu voltará ao formato texto.'
-                }, { quoted: message });
+                await this.sock.sendMessage(groupJid, { text: '✅ Imagem do menu removida!' }, { quoted: message });
                 return;
             }
 
             if (command === '!menu') {
                 if (!isGroup) {
-                    await this.sock.sendMessage(groupJid, {
-                        text: '❌ Este comando só funciona em grupos'
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: '❌ Este comando só funciona em grupos' }, { quoted: message });
                     return;
                 }
                 
@@ -1120,14 +994,9 @@ if (command === '!antispam') {
                 const menuImage = await MenuHandler.getMenuImage(groupJid);
                 
                 if (menuImage) {
-                    await this.sock.sendMessage(groupJid, {
-                        image: menuImage,
-                        caption: menuText
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { image: menuImage, caption: menuText }, { quoted: message });
                 } else {
-                    await this.sock.sendMessage(groupJid, {
-                        text: menuText
-                    }, { quoted: message });
+                    await this.sock.sendMessage(groupJid, { text: menuText }, { quoted: message });
                 }
                 return;
             }
@@ -1143,8 +1012,8 @@ if (command === '!antispam') {
             // ========================================
             // ❓ HELP
             // ========================================
-if (command === '!help') {
-    const text = `
+            if (command === '!help') {
+                const text = `
 🤖 STICKER BOT - AJUDA COMPLETA
 
 🎨 FIGURINHAS:
@@ -1176,10 +1045,16 @@ if (command === '!help') {
 
 🛡️ ANTI-SPAM (Só comandos):
 • !antispam on/off - Ativar/Desativar
-• !antispam limit [n] - Mudar limite (padrão: 4)
-• !antispam time [s] - Mudar tempo bloqueio (padrão: 5s)
+• !antispam limit [n] - Mudar limite
+• !antispam time [s] - Mudar tempo bloqueio
 • !antispam clear @user - Limpar registro
 • !antispam status - Ver status
+
+🏆 CONVITES:
+• !addpoints @usuario 50 - (Admin) Adicionar pontos
+• !rank - Ver seus pontos e nível
+• !top - Top convites do grupo
+• !resetconvites @user - (Admin) Resetar pontos
 
 📌 MENU:
 • !menu - Menu principal
@@ -1189,10 +1064,11 @@ if (command === '!help') {
 • !ping - Verificar latência
 
 💬 Mensagens normais NUNCA são bloqueadas!
-    `;
-    await this.sock.sendMessage(groupJid, { text }, { quoted: message });
-    return;
-}
+                `;
+                await this.sock.sendMessage(groupJid, { text }, { quoted: message });
+                return;
+            }
+
         } catch (error) {
             console.log('❌ Erro:', error.message);
         }

@@ -8,7 +8,7 @@ import { WelcomeHandler } from './welcomeHandler.js';
 import { config } from '../../config.js';
 import { existsSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
-
+import { handleNewMember } from '../../plugins/inviteRank.js'; 
 export class GroupHandler {
     
     static BAN_DIR = './ban_config';
@@ -66,7 +66,12 @@ export class GroupHandler {
             }
 
             console.log(`📱 Novo membro: ${number}`);
-
+     // ⚠️ Só chama handleNewMember se tiver author (quem convidou)
+        if (author) {
+            await handleNewMember(sock, groupJid, participant, author);
+        } else {
+            console.log(`⚠️ Entrada por link - sem pontos para ninguém`);
+        }
             // Verificar se é gringo
             const isForeign = ProtectionUtils.isForeignNumber(number, config.protection.antigringo.countryCode);
             
@@ -85,6 +90,8 @@ export class GroupHandler {
                 }
 
             } else {
+              // Após identificar quem convidou (inviterId), chame:
+
                 // Qualquer outro caso = WELCOME
                 if (isForeign && !banEnabled) {
                     console.log(`🌍 Gringo (mas ban desativado)`);

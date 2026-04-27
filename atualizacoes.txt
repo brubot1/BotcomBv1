@@ -23,5 +23,13 @@ Qualquer membro:
 2. !pack reacoes - Recebe 1 figurinha
 3. !pack reacoes 3 - Recebe 3 figurinhas
 4. !sticker - Figurinha aleatória
-· 
+
+12.04
+antilink 
+
+25.04
+cmd de convite 
+(pontos por adicionar membros)
+
+· CMD de limitar uso de cmds
 · 
